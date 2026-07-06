@@ -265,6 +265,7 @@ describe('processOneTick — overload path', () => {
     s.overloadWaitUntil = Date.now() - 1;
     assert.equal(await processOneTick(s, t, '%0', c, () => true, NO_JITTER), 'overload-gave-up');
     assert.equal(t._sent.length, 1);
+    assert.equal(s._gaveUp, true, 'give-up must be flagged for external consumers (e.g. tmux status bar)');
   });
 
   it('switches to the usage path if a usage limit appears mid-overload', async () => {
@@ -354,6 +355,20 @@ describe('processOneTick — StopFailure event path (authoritative)', () => {
     assert.equal(await processOneTick(s, t, '%0', cfg(), () => true, NO_JITTER), 'overload-exited-to-shell');
     assert.equal(t._sent.length, 0);
     assert.equal(s.status, 'monitoring');
+  });
+
+  it('flags gaveUp when a fresh event arrives already past the cap, even though status stays "monitoring"', async () => {
+    // Regression: this path returns from within the (idle) 'monitoring' branch and never
+    // assigns state.status, so a naive reader would see status:'monitoring' (green/live)
+    // for a monitor that has permanently stopped acting on this pane's failures.
+    const t = mockTmux('idle prompt', 'node', true, ev);
+    const s = createMonitorState();
+    const c = cfg({ maxTotalWaitMinutes: 0.5 }); // cap = 30s
+    s.overloadTotalWaitMs = 30_000; // already at/over the cap before this tick
+    const r = await processOneTick(s, t, '%0', c, () => true, NO_JITTER);
+    assert.equal(r, 'overload-gave-up');
+    assert.equal(s.status, 'monitoring');
+    assert.equal(s._gaveUp, true);
   });
 });
 

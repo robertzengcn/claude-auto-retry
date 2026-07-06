@@ -133,6 +133,7 @@ describe('processOneTick — safeguard path', () => {
     s.safeguardWaitUntil = Date.now() - 1;
     assert.equal(await processOneTick(s, t, '%0', c, () => true), 'safeguard-gave-up');
     assert.equal(t._sent.length, 2);
+    assert.equal(s._gaveUp, true, 'give-up must be flagged for external consumers (e.g. tmux status bar)');
   });
 
   it('clears back to monitoring when the flag is gone', async () => {

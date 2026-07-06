@@ -201,13 +201,17 @@ describe('processOneTick', () => {
     // Should stay in 'waiting' to avoid re-detection loop
     assert.equal(s.status, 'waiting');
     assert.ok(s.waitUntil > Date.now());
+    // Flagged so external consumers (tmux status bar) don't render a perpetually
+    // resetting countdown for a monitor that will not send further retries.
+    assert.equal(s._gaveUp, true);
   });
   it('resets from max-retries when rate limit clears', async () => {
     const t = mockTmux('Claude is working normally');
     const s = createMonitorState();
-    s.waitUntil = Date.now() - 1000; s.status = 'waiting'; s.attempts = 10;
+    s.waitUntil = Date.now() - 1000; s.status = 'waiting'; s.attempts = 10; s._gaveUp = true;
     // Rate limit cleared → should detect user-continued before max-retries check
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'user-continued');
     assert.equal(s.attempts, 0);
+    assert.equal(s._gaveUp, false);
   });
 });

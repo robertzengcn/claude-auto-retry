@@ -4,6 +4,7 @@ import { capturePane, sendKeys, sendKey, getPaneCommand, isProcessForeground } f
 import { loadConfig } from './config.js';
 import { createLogger } from './logger.js';
 import { readStopFailureEvent, clearStopFailureEvent, isRetryableError } from './events.js';
+import { writeStatus, clearStatus, sweepStaleStatus } from './status-file.js';
 
 const DEFAULT_FOREGROUND_COMMANDS = ['node', 'claude', 'npx', 'tsx', 'bun', 'deno'];
 const SHELL_COMMANDS = ['bash', 'zsh', 'sh', 'fish', 'dash', 'ksh'];
@@ -49,12 +50,14 @@ function resetOverload(state) {
   state.overloadTotalWaitMs = 0;
   state.overloadWaitUntil = 0;
   state.viaEvent = false;
+  state._gaveUp = false;
 }
 
 function resetSafeguard(state) {
   state.safeguardAttempts = 0;
   state.safeguardWaitUntil = 0;
   state._safeguardGaveUp = false;
+  state._gaveUp = false;
 }
 
 // Foreground safety: is claude/node the foreground process (safe to send-keys), or did
@@ -76,6 +79,7 @@ function enterUsageWait(state, stripped, config) {
   const parsed = message ? parseResetTime(message) : null;
   state.waitUntil = Date.now() + calculateWaitMs(parsed, config.marginSeconds, config.fallbackWaitHours);
   state.status = 'waiting';
+  state._gaveUp = false;
   return 'waiting';
 }
 
@@ -155,14 +159,18 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     // session (and a banner re-printed by another process keeps it "rate-limited" the
     // whole time). isWorking ⇒ the session continued; never inject into it.
     if (!isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES) || isWorking(stripped)) {
-      state.status = 'monitoring'; state.attempts = 0;
+      state.status = 'monitoring'; state.attempts = 0; state._gaveUp = false;
       return 'user-continued';
     }
 
     if (state.attempts >= config.maxRetries) {
-      // Stay in 'waiting' to avoid re-detecting the stale rate limit
-      // on the next tick and creating an infinite max-retries loop.
+      // Stay in 'waiting' to avoid re-detecting the stale rate limit on the next tick
+      // and creating an infinite max-retries loop. This IS a give-up (no further
+      // retries will be sent while the banner persists) even though `status` stays
+      // 'waiting' — flagged so external consumers (tmux status bar) don't render a
+      // perpetually-resetting countdown for a monitor that has stopped acting.
       state.waitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 12);
+      state._gaveUp = true;
       return 'max-retries';
     }
 
@@ -249,6 +257,7 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     // or mask a real outage. Long cooldown to avoid re-detecting the stale error.
     if (state.overloadTotalWaitMs >= capMs) {
       state.overloadWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 12);
+      state._gaveUp = true;
       return 'overload-gave-up';
     }
 
@@ -319,6 +328,7 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     // the stale error every tick.
     if (state.safeguardAttempts >= safeguard.maxRetries) {
       state.safeguardWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 12);
+      state._gaveUp = true;
       // Give up LOUDLY — once. Subsequent holds are silent or the warn re-logs ~1/min
       // for as long as the sticky banner sits at the prompt.
       if (state._safeguardGaveUp) return 'safeguard-holding';
@@ -367,7 +377,7 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
       await tmuxAdapter.clearEvent();               // consume
       if (isWorking(stripped)) { resetOverload(state); return 'overload-cleared'; } // self-recovered
       const capMs = overload.maxTotalWaitMinutes * 60_000;
-      if (state.overloadTotalWaitMs >= capMs) return 'overload-gave-up';
+      if (state.overloadTotalWaitMs >= capMs) { state._gaveUp = true; return 'overload-gave-up'; }
       const w = nextOverloadWaitMs(state.overloadAttempts, overload, rand);
       state.overloadTotalWaitMs += w;
       state.overloadWaitUntil = Date.now() + w;
@@ -413,6 +423,24 @@ export async function startMonitor(pane, pid) {
 
   await logger.info(`Monitor started for pane ${pane} (claude PID: ${pid})`);
 
+  // Best-effort GC of status files left behind by monitors that died without cleaning up
+  // (SIGKILL, host sleep/crash). Runs once per monitor start, not per tick.
+  sweepStaleStatus().catch(() => {});
+
+  let shuttingDown = false;
+  const shutdown = (signal) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    // Best-effort: fire the unlink and exit without waiting on the promise. Signal
+    // handlers are not the place to await — a hung filesystem must not block the
+    // process from actually terminating on SIGTERM/SIGINT.
+    clearStatus(pane).catch(() => {}).finally(() => {
+      process.exit(signal === 'SIGINT' ? 130 : 143);
+    });
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+
   const eventMaxAgeMs = (config.overload?.eventMaxAgeSeconds || 120) * 1000;
   const tmuxAdapter = {
     capturePane, sendKeys, sendKey, getPaneCommand,
@@ -429,7 +457,30 @@ export async function startMonitor(pane, pid) {
       const result = await processOneTick(state, tmuxAdapter, pane, config, isAlive);
       consecutiveErrors = 0;
 
-      if (result === 'exit') { await logger.info('Claude exited. Monitor shutting down.'); process.exit(0); }
+      if (result === 'exit') {
+        await clearStatus(pane).catch(() => {});
+        await logger.info('Claude exited. Monitor shutting down.');
+        process.exit(0);
+      }
+
+      // Published for external consumers (e.g. a tmux status-bar segment) — best-effort,
+      // never let a write failure interrupt the monitor loop. pollIntervalSeconds travels
+      // with every snapshot so the reader can derive its own staleness threshold instead
+      // of assuming a fixed interval (a configured pollIntervalSeconds far above the old
+      // hardcoded 30s stale-check would otherwise make a healthy monitor's segment blank
+      // out for a large fraction of every tick). gaveUp flags the terminal states where
+      // `status` alone doesn't tell a reader the monitor has stopped acting.
+      await writeStatus(pane, {
+        status: state.status,
+        waitUntil: Math.floor(state.waitUntil / 1000),
+        overloadWaitUntil: Math.floor(state.overloadWaitUntil / 1000),
+        safeguardWaitUntil: Math.floor(state.safeguardWaitUntil / 1000),
+        attempts: state.attempts,
+        overloadAttempts: state.overloadAttempts,
+        safeguardAttempts: state.safeguardAttempts,
+        pollIntervalSeconds: config.pollIntervalSeconds,
+        gaveUp: !!state._gaveUp,
+      }).catch(() => {});
       if (result === 'waiting' && state.lastRateLimitMessage) {
         const secs = Math.round((state.waitUntil - Date.now()) / 1000);
         await logger.info(`Rate limit detected: "${state.lastRateLimitMessage}". Waiting ${secs}s...`);
@@ -472,6 +523,7 @@ export async function startMonitor(pane, pid) {
       consecutiveErrors++;
       await logger.error(`Monitor tick error: ${err.message}`).catch(() => {});
       if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+        await clearStatus(pane).catch(() => {});
         await logger.error(`${MAX_CONSECUTIVE_ERRORS} consecutive errors. Pane likely destroyed. Exiting.`).catch(() => {});
         process.exit(1);
       }

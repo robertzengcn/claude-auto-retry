@@ -80,6 +80,7 @@ When you disconnect (SSH drops, close terminal, laptop sleeps), **tmux keeps run
 - **Safe send-keys** — verifies Claude is still the foreground process before injecting text
 - **Overload backoff** — detects sustained API overload (`429/500/502/503/504/529`) and retries on a configurable exponential backoff with jitter and a cumulative-wait cap, distinct from the usage-reset path ([details](#overload-backoff))
 - **Safeguard retry** — auto-continues past an AUP-safeguard false-positive (often transient), capped at a few tries so a sticky flag can't loop ([details](#safeguard-retry))
+- **tmux status bar indicator** — see at a glance whether a pane is being monitored, waiting on a reset, backing off from overload, or has given up ([details](#tmux-status-bar-indicator))
 - **`--print` mode support** — buffers output, retries cleanly for piped/scripted usage
 - **Configurable** — retry count, wait margin, custom patterns, retry message
 - **Config validation** — bad config values fall back to safe defaults instead of crashing
@@ -311,6 +312,68 @@ Configured under a `safeguard` block (defaults shown):
 
 Usage limits always take precedence; the safeguard path only acts when Claude is idle
 (no `esc to interrupt` footer) and the foreground process is `claude`/`node`.
+## tmux status bar indicator
+
+The monitor writes a small JSON snapshot per pane on every poll tick, so you can tell
+at a glance — without checking logs — whether a pane is being watched, waiting out a
+usage-limit reset, backing off from overload or a safeguard flag, or has given up.
+
+Add a segment to `status-right` (or `status-left`) in `~/.tmux.conf` that shells out to
+the bundled reader script, passing the current pane id **and** the server's socket path:
+
+```tmux
+set -g status-interval 5
+set -g status-right "#(~/.local/lib/node_modules/claude-auto-retry/bin/tmux-status.sh '#{pane_id}' '#{socket_path}') | %Y-%m-%d %H:%M"
+```
+
+**Use an absolute path, not the bare command name.** `#()` commands run inside the tmux
+*server's* own environment, not the environment of whichever shell you attached from —
+if the server was started before your shell rc added `npm`/`nvm`'s bin directory to
+`PATH` (e.g. tmux auto-started at login, or by another program), the bare command name
+resolves to nothing and the segment stays permanently blank with no error anywhere.
+Find your actual install path with `which claude-auto-retry-tmux-status` (run it in a
+normal shell, then hardcode that path in `.tmux.conf`) if it differs from the example
+above. If you use nvm and switch Node versions, re-check the path.
+
+`tmux` substitutes `#{pane_id}` and `#{socket_path}` itself before running the command
+(these are tmux format variables, resolved at expansion time — not environment
+variables the script has to go looking for), so the segment always reflects whichever
+pane you're looking at, correctly scoped to the tmux server it belongs to. The
+`socket_path` argument matters if you ever run more than one tmux server on the same
+machine (e.g. `tmux -L work`, `tmux -L personal`, or two users' default servers on a
+shared host): pane ids like `%2` are only unique *within* a server, so without it two
+different servers' `%2` panes would render each other's status. Always pass it: the
+monitor keys each status file by the socket path it inherits from `$TMUX`, so a
+single-argument config looks under a shared `default` key the monitor never writes to,
+and the segment simply stays blank.
+
+It prints:
+
+| Pane state | Indicator |
+|------------|-----------|
+| Actively monitoring | `🟢AR` |
+| Waiting on a usage-limit reset | `⏳AR 1h30m` |
+| Backing off from overload | `🟠AR 45s` |
+| Retrying past a safeguard/AUP false-positive | `🛡AR 8s` |
+| Given up — max retries/backoff cap reached; no further automatic action on this pane | `🔴AR` |
+| No monitor for this pane, or the status file is stale (monitor process died without cleaning up) | *(nothing)* |
+
+`🔴AR` overrides whatever the underlying status would otherwise render. Several
+give-up paths intentionally leave the monitor's internal status at whatever it was
+when it stopped acting (so the scraper/event logic doesn't re-detect its own stale
+error next tick) — without an explicit `gaveUp` flag in the snapshot, the status bar
+would keep showing a live `🟢`/`⏳`/`🟠` indicator for a monitor that will not act
+again on this pane until the underlying condition clears on its own.
+
+Staleness is derived from each snapshot's own `pollIntervalSeconds` (age > 2× the
+monitor's configured poll interval) rather than a fixed constant, so a healthy monitor
+running with a longer `pollIntervalSeconds` doesn't have its segment blank out for a
+large fraction of every tick.
+
+The script (`bin/tmux-status.sh`) is pure POSIX shell with no dependencies (no `jq`,
+no `node`), so it's cheap to run every few seconds from every attached client.
+`status-interval` defaults to 15s in tmux; dropping it to `5` (matching the monitor's
+default `pollIntervalSeconds`) keeps the overload countdown responsive.
 
 ## CLI Commands
 
