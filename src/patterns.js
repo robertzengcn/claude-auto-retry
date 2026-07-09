@@ -20,7 +20,11 @@ export function stripAnsi(text) {
 // Claude Code renders rate limits across multiple lines in its TUI, e.g.:
 //   "⚠ You've hit your limit"
 //   "· resets 3pm (UTC)"
-// Detection: find a "limit" line and a "resets" line within 6 lines of each other.
+// Also newer API Error format (request rejected / 429) with ISO timestamps:
+//   "API Error: Request rejected (429)"
+//   "reset at 2026-07-09 14:12:26"
+// Detection: find a "limit" (or "api error" / "request rejected") line and
+// a "resets" line within 6 lines of each other.
 
 const LIMIT_PATTERNS = [
   /(?:hit|exceeded|reached).*(?:your|the)\s*(?:[\w-]+\s+){0,3}limit/i,  // "hit/exceeded/reached your [session|weekly|5-hour] limit"
@@ -30,6 +34,8 @@ const LIMIT_PATTERNS = [
   /out of.*usage/i,                                  // "out of extra usage"
   /rate limit/i,                                     // "rate limit"
   /try again in/i,                                   // "try again in X hours" (implies rate limiting)
+  /request rejected/i,                               // "Request rejected (429)"
+  /API Error\b/i,                                    // "API Error:" (with nearby reset line)
 ];
 
 const RESET_PATTERNS = [

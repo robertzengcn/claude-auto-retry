@@ -86,6 +86,12 @@ describe('isRateLimited', () => {
   it('still detects "You\'ve hit your 5-hour limit" (no qualifier regression)', () => {
     assert.equal(isRateLimited("You've hit your 5-hour limit · resets 3pm (UTC)"), true);
   });
+  it('detects "API Error: Request rejected (429)" with ISO reset (#14)', () => {
+    assert.equal(isRateLimited('API Error: Request rejected (429)\nreset at 2026-07-09 14:12:26'), true);
+  });
+  it('detects "API Error:" with ISO reset on next line', () => {
+    assert.equal(isRateLimited('● API Error: Request rejected (429)\n  reset at 2026-07-09 14:12:26'), true);
+  });
 });
 
 describe('stripAnsi (private-mode sequences)', () => {
@@ -116,6 +122,14 @@ describe('findRateLimitMessage', () => {
   it('returns the most recent resets line when scrollback has a stale one', () => {
     const text = 'You\'ve hit your limit · resets 11:30am (UTC)\nlots of output\nYou\'ve hit your limit · resets 4:30pm (UTC)';
     assert.ok(findRateLimitMessage(text).includes('4:30pm'));
+  });
+  it('returns the ISO reset line from 429 error', () => {
+    const text = 'API Error: Request rejected (429)\nreset at 2026-07-09 14:12:26';
+    assert.ok(findRateLimitMessage(text).includes('14:12:26'));
+  });
+  it('returns the ISO reset line from bullet-point 429 error', () => {
+    const text = '● API Error: Request rejected (429)\n  reset at 2026-07-09 14:12:26';
+    assert.ok(findRateLimitMessage(text).includes('14:12:26'));
   });
 });
 
