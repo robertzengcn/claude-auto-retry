@@ -28,6 +28,35 @@ describe('parseResetTime', () => {
     const r = parseResetTime('resets 3pm');
     assert.equal(r.hour, 15); assert.equal(r.timezone, null);
   });
+  it('parses "resets at 2026-07-09 09:08:03" (ISO format)', () => {
+    const r = parseResetTime('Your limit will reset at 2026-07-09 09:08:03');
+    assert.ok(r.absoluteMs !== undefined, 'expected absoluteMs');
+    const d = new Date(r.absoluteMs);
+    assert.equal(d.getFullYear(), 2026);
+    assert.equal(d.getMonth(), 6); // 0-indexed: July = 6
+    assert.equal(d.getDate(), 9);
+    assert.equal(d.getHours(), 9);
+    assert.equal(d.getMinutes(), 8);
+    assert.equal(d.getSeconds(), 3);
+  });
+  it('parses "resets 2026-07-09 09:08:03" without "at"', () => {
+    const r = parseResetTime('resets 2026-07-09 09:08:03');
+    assert.ok(r.absoluteMs !== undefined);
+    const d = new Date(r.absoluteMs);
+    assert.equal(d.getMonth(), 6);
+    assert.equal(d.getDate(), 9);
+  });
+  it('parses ISO format from the full API error line', () => {
+    const line = 'API Error: Request rejected (429) · [1308][Usage limit reached for 5 hour. Your limit will reset at 2026-07-09 09:08:03][202607090903190a40ac474ab1467b]';
+    const r = parseResetTime(line);
+    assert.ok(r.absoluteMs !== undefined, 'expected absoluteMs');
+    const d = new Date(r.absoluteMs);
+    assert.equal(d.getFullYear(), 2026);
+    assert.equal(d.getMonth(), 6);
+    assert.equal(d.getDate(), 9);
+    assert.equal(d.getHours(), 9);
+    assert.equal(d.getMinutes(), 8);
+  });
   it('returns null for unparseable text', () => {
     assert.equal(parseResetTime('some random text'), null);
   });
@@ -123,5 +152,21 @@ describe('calculateWaitMs', () => {
     );
     const hours = wait / 3600_000;
     assert.ok(hours > 22 && hours < 23, `expected ~22.6h, got ${hours.toFixed(2)}h`);
+  });
+
+  it('calculates wait for ISO datetime in the future', () => {
+    const now = new Date('2026-07-09T09:00:00');
+    const target = new Date('2026-07-09T09:08:03');
+    const r = { absoluteMs: target.getTime() };
+    const wait = calculateWaitMs(r, 60, 5, now);
+    const expected = (target.getTime() - now.getTime()) + 60_000;
+    assert.ok(Math.abs(wait - expected) < 2000);
+  });
+  it('returns 0 + margin when ISO datetime is in the past', () => {
+    const now = new Date('2026-07-09T09:10:00');
+    const target = new Date('2026-07-09T09:08:03');
+    const r = { absoluteMs: target.getTime() };
+    const wait = calculateWaitMs(r, 60, 5, now);
+    assert.ok(Math.abs(wait - 60_000) < 2000);
   });
 });

@@ -2,6 +2,22 @@ const RESET_TIME_REGEX = /resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\
 const RELATIVE_TIME_REGEX = /(?:try again|wait|resets?\s+in)[:\s]\s*(?:for\s+)?(?:in\s+)?(\d+)\s*(hours?|minutes?|mins?|h|m)\b/i;
 
 export function parseResetTime(text) {
+  // Try ISO datetime format first: "resets at 2026-07-09 09:08:03"
+  // Must come before the simple regex, which would match only the first
+  // two digits of the year and misinterpret the time.
+  const ISO_RESET_REGEX = /resets?\s+(?:at\s+)?(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})(?::(\d{2}))?/i;
+  const isoMatch = text.match(ISO_RESET_REGEX);
+  if (isoMatch) {
+    const year = parseInt(isoMatch[1], 10);
+    const month = parseInt(isoMatch[2], 10);
+    const day = parseInt(isoMatch[3], 10);
+    const hour = parseInt(isoMatch[4], 10);
+    const minute = parseInt(isoMatch[5], 10);
+    const second = isoMatch[6] ? parseInt(isoMatch[6], 10) : 0;
+    const target = new Date(year, month - 1, day, hour, minute, second);
+    return { absoluteMs: target.getTime() };
+  }
+
   // Try absolute time first: "resets at 3pm (UTC)"
   const absMatch = text.match(RESET_TIME_REGEX);
   if (absMatch) {
@@ -36,6 +52,13 @@ export function calculateWaitMs(parsed, marginSeconds = 60, fallbackHours = 5, n
   // Handle relative times: "try again in 5 minutes"
   if (parsed.relative) {
     return parsed.waitMs + marginSeconds * 1000;
+  }
+
+  // Handle absolute ISO datetime: "resets at 2026-07-09 09:08:03"
+  if (parsed.absoluteMs !== undefined) {
+    let diff = parsed.absoluteMs - now.getTime();
+    if (diff < 0) diff = 0;
+    return diff + marginSeconds * 1000;
   }
 
   let tz;
