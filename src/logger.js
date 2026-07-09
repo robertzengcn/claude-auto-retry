@@ -8,7 +8,7 @@ const CLEANUP_INTERVAL_MS = 3600_000;
 let lastCleanup = 0;
 
 function timestamp() {
-  return new Date().toISOString().replace('T', ' ').replace(/\.\d+Z$/, '');
+  return new Date().toLocaleString('sv-SE').replace('T', ' ');
 }
 
 function todayFile(dir) {
