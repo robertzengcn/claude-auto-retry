@@ -3,7 +3,7 @@ import { parseResetTime, calculateWaitMs } from './time-parser.js';
 import { capturePane, sendKeys, sendKey, getPaneCommand, isProcessForeground } from './tmux.js';
 import { loadConfig } from './config.js';
 import { createLogger } from './logger.js';
-import { readStopFailureEvent, clearStopFailureEvent, isRetryableError } from './events.js';
+import { readStopFailureEvent, clearStopFailureEvent, isRetryableError, isUsageLimitError } from './events.js';
 import { writeStatus, clearStatus, sweepStaleStatus } from './status-file.js';
 
 const DEFAULT_FOREGROUND_COMMANDS = ['node', 'claude', 'npx', 'tsx', 'bun', 'deno'];
@@ -363,11 +363,28 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
   if (overload && overload.enabled && tmuxAdapter.readEvent) {
     const ev = await tmuxAdapter.readEvent();
     if (ev) {
-      // Consume-side guard: trust no writer. The hook entry in settings.json freezes the
-      // cli.js path + matcher at install time, so an OLDER hook binary (whose matcher and
-      // RETRYABLE set still include rate_limit) can keep writing markers after an upgrade.
-      // Consume-and-ignore anything non-retryable, and do NOT latch eventMode off it —
-      // a misclassified marker must not start a backoff nor disable the scraper paths.
+      // Usage/session limit via the event path. Claude Code reports `rate_limit` when a
+      // usage limit ends the turn — an HOURS-scale wait until a printed reset time, the
+      // opposite of the seconds-scale overload below. The event is the reliable trigger
+      // (it fires on every terminal API error; the tail-restricted scraper misses a
+      // gateway 429 that renders transiently and scrolls out of the live tail), but the
+      // payload carries no reset timestamp, so we scrape it from the pane. Only schedule
+      // a wait when a reset time is present: a rate_limit with no reset time is a
+      // transient 429 (or a banner already gone), left to Claude's own retry / scraper.
+      if (isUsageLimitError(ev.error)) {
+        await tmuxAdapter.clearEvent();             // consume so it can't re-fire
+        if (isWorking(stripped)) return 'monitoring'; // limit cleared / Claude resumed
+        const message = findRateLimitMessage(stripped, config.customPatterns);
+        if (message && parseResetTime(message)) {
+          state.eventMode = true;                   // hook proven live
+          return enterUsageWait(state, stripped, config);
+        }
+        state._ignoredEventError = ev.error;
+        return 'event-ignored';
+      }
+      // Consume-side guard: trust no writer. An unknown / non-actionable error type is
+      // consumed-and-ignored, and we do NOT latch eventMode off it — a misclassified
+      // marker must not start a backoff nor disable the scraper paths.
       if (!isRetryableError(ev.error)) {
         await tmuxAdapter.clearEvent();             // consume so it can't re-fire
         state._ignoredEventError = ev.error;
@@ -496,7 +513,7 @@ export async function startMonitor(pane, pid) {
       if (result === 'user-continued') await logger.info('User already continued. Attempt counter reset.');
       if (result === 'max-retries') await logger.warn(`Max retries (${config.maxRetries}) reached. Monitor still active but will not send further retries until rate limit clears.`);
       if (result === 'skipped-not-claude') await logger.warn(`Foreground is "${state._lastForeground}", not Claude. Skipping send-keys. (Add to foregroundCommands in ~/.claude-auto-retry.json if this is wrong)`);
-      if (result === 'event-ignored') await logger.warn(`Ignored StopFailure marker with non-retryable error="${state._ignoredEventError}". If this is "rate_limit", an outdated hook is installed — re-run "claude-auto-retry install-hook".`);
+      if (result === 'event-ignored') await logger.warn(`Ignored StopFailure marker with non-actionable error="${state._ignoredEventError}". ` + (state._ignoredEventError === 'rate_limit' ? 'No reset time was visible in the pane (transient 429 or banner already gone) — nothing to wait for.' : `If this is "rate_limit", an outdated hook is installed — re-run "claude-auto-retry install-hook".`));
       if (result === 'overload-detected') {
         const secs = Math.round((state.overloadWaitUntil - Date.now()) / 1000);
         const m = state._overloadMatch;

@@ -372,6 +372,55 @@ describe('processOneTick — StopFailure event path (authoritative)', () => {
   });
 });
 
+describe('processOneTick — StopFailure rate_limit → usage-wait (gateway 429)', () => {
+  // A future ISO reset time, formatted the way the z.ai gateway renders it. Built from
+  // local components because calculateWaitMs reconstructs the Date in local time.
+  function futureResetStr(hoursAhead = 3) {
+    const d = new Date(Date.now() + hoursAhead * 3600 * 1000);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  }
+
+  it('routes a rate_limit marker to the hours-scale usage wait, scraping the reset time', async () => {
+    // The banner sits ABOVE the 12-line tail (scrolled out of the live tail — exactly the
+    // gateway-429 case the tail-restricted scraper misses) but within the 20-line capture
+    // findRateLimitMessage scans. Only the event path can schedule this wait.
+    const resetStr = futureResetStr(3);
+    const limitLine = `API Error: Request rejected (429) · [1308][Usage limit reached for 5 hour. Your limit will reset at ${resetStr}][2026070915304607dba0610c3d427f]`;
+    const pane = [limitLine, ...Array(13).fill('● idle at the prompt')].join('\n');
+    const t = mockTmux(pane, 'node', true, { error: 'rate_limit', ts: Date.now() });
+    const s = createMonitorState();
+    const r = await processOneTick(s, t, '%0', cfg(), () => true, NO_JITTER);
+    assert.equal(r, 'waiting');
+    assert.equal(s.status, 'waiting');
+    assert.equal(t._cleared, true);                 // marker consumed
+    assert.equal(t._sent.length, 0);                // waiting for the reset, not retrying yet
+    assert.equal(s.eventMode, true);                // hook proven live
+    const resetMs = new Date(resetStr.replace(' ', 'T')).getTime();
+    assert.ok(near(s.waitUntil, resetMs + DEFAULT_CONFIG.marginSeconds * 1000));
+  });
+
+  it('ignores a rate_limit marker with no reset time (transient 429 / banner gone)', async () => {
+    const t = mockTmux('idle prompt', 'node', true, { error: 'rate_limit', ts: Date.now() });
+    const s = createMonitorState();
+    const r = await processOneTick(s, t, '%0', cfg(), () => true, NO_JITTER);
+    assert.equal(r, 'event-ignored');
+    assert.equal(s.status, 'monitoring');
+    assert.equal(s.eventMode, false);               // did not latch off a non-wait
+    assert.equal(t._cleared, true);
+  });
+
+  it('does NOT enter a wait for a rate_limit marker when Claude has resumed', async () => {
+    const t = mockTmux('Cogitating… (esc to interrupt)', 'node', true, { error: 'rate_limit', ts: Date.now() });
+    const s = createMonitorState();
+    const r = await processOneTick(s, t, '%0', cfg(), () => true, NO_JITTER);
+    assert.equal(r, 'monitoring');
+    assert.equal(s.status, 'monitoring');
+    assert.equal(t._sent.length, 0);
+    assert.equal(t._cleared, true);
+  });
+});
+
 describe('processOneTick — overload gating (exited-to-shell vs alive)', () => {
   it('does NOT send-keys when foreground is a shell; reports exited-to-shell (relaunch off)', async () => {
     const t = mockTmux('API Error: 500 Internal server error\nuser@host:~$', 'bash', false);

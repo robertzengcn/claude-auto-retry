@@ -4,7 +4,8 @@ import { mkdtemp, rm, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  isRetryableError, writeStopFailureEvent, readStopFailureEvent, clearStopFailureEvent,
+  isRetryableError, isUsageLimitError, isActionableError,
+  writeStopFailureEvent, readStopFailureEvent, clearStopFailureEvent,
 } from '../src/events.js';
 
 describe('isRetryableError', () => {
@@ -13,15 +14,43 @@ describe('isRetryableError', () => {
       assert.equal(isRetryableError(e), true, e);
     }
   });
-  it('rejects rate_limit (a session/usage limit is an hours-scale wait, not an overload)', () => {
-    // Regression: routing rate_limit through the event/overload path made the monitor
-    // fire futile seconds-scale "Continue" retries into a session-limited pane and fight
-    // the scraper usage-wait path. Session limits are owned by the scraper usage path.
+  it('rejects rate_limit as an OVERLOAD (it is an hours-scale usage wait, not seconds)', () => {
+    // rate_limit must NOT enter the seconds-scale overload backoff (that fired futile
+    // "Continue" retries into a session-limited pane). It is handled separately as a
+    // usage limit — see isUsageLimitError / isActionableError, and the monitor's
+    // rate_limit → usage-wait routing.
     assert.equal(isRetryableError('rate_limit'), false);
   });
   it('rejects permanent / unknown classes', () => {
     for (const e of ['authentication_failed', 'billing_error', 'invalid_request', '', undefined, null, 42]) {
       assert.equal(isRetryableError(e), false, String(e));
+    }
+  });
+});
+
+describe('isUsageLimitError', () => {
+  it('accepts rate_limit (case-insensitive)', () => {
+    assert.equal(isUsageLimitError('rate_limit'), true);
+    assert.equal(isUsageLimitError('RATE_LIMIT'), true);
+  });
+  it('rejects overload classes and permanent/unknown', () => {
+    for (const e of ['overloaded', 'server_error', 'billing_error', 'invalid_request', '', undefined, null]) {
+      assert.equal(isUsageLimitError(e), false, String(e));
+    }
+  });
+});
+
+describe('isActionableError', () => {
+  // The hook persists an event for any class the monitor will act on: overload
+  // (overloaded/server_error → seconds backoff) OR usage limit (rate_limit → hours wait).
+  it('persists overload and usage-limit classes for the monitor', () => {
+    for (const e of ['overloaded', 'server_error', 'rate_limit']) {
+      assert.equal(isActionableError(e), true, e);
+    }
+  });
+  it('drops permanent/unknown classes (no retry will help)', () => {
+    for (const e of ['authentication_failed', 'billing_error', 'invalid_request', '', undefined, null]) {
+      assert.equal(isActionableError(e), false, String(e));
     }
   });
 });

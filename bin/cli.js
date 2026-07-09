@@ -6,7 +6,7 @@ import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { writeStopFailureEvent, isRetryableError } from '../src/events.js';
+import { writeStopFailureEvent, isActionableError } from '../src/events.js';
 import { sweepStaleStatus } from '../src/status-file.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -206,11 +206,13 @@ async function cmdLogs() {
 const HOOK_MARKER = '_stopfailure-hook';
 
 function stopFailureHookEntry() {
-  // Matcher filters on the StopFailure error type; only the transient-overload classes.
-  // rate_limit is intentionally omitted — a session/usage limit is an hours-scale wait
-  // owned by the scraper usage path, not a seconds-scale event retry (see src/events.js).
+  // Matcher filters on the StopFailure error type. rate_limit IS included: a
+  // usage/session limit is an hours-scale wait, but it still arrives as a StopFailure
+  // event, and on gateways (z.ai & similar) that event is the only reliable trigger —
+  // the transient 429 render is missed by the tail-restricted scraper. The monitor
+  // routes rate_limit to the usage-wait path (not the seconds-scale overload backoff).
   return {
-    matcher: 'overloaded|server_error',
+    matcher: 'overloaded|server_error|rate_limit',
     hooks: [{ type: 'command', command: `node ${__filename} ${HOOK_MARKER}`, timeout: 5 }],
   };
 }
@@ -220,15 +222,16 @@ function resolveConfigDir(arg) {
 }
 
 // Invoked BY Claude Code on a turn-ending API error. Reads the hook JSON on stdin and,
-// for a retryable error, writes a pane-keyed marker the monitor consumes. Must never
-// disrupt the session: StopFailure output/exit is ignored, and we swallow all errors.
+// for an actionable error (overload OR usage limit), writes a pane-keyed marker the
+// monitor consumes. Must never disrupt the session: StopFailure output/exit is ignored,
+// and we swallow all errors.
 async function cmdStopFailureHook() {
   try {
     const chunks = [];
     for await (const c of process.stdin) chunks.push(c);
     const payload = JSON.parse(Buffer.concat(chunks).toString() || '{}');
     const pane = process.env.CLAUDE_AUTO_RETRY_PANE;
-    if (pane && isRetryableError(payload.error)) {
+    if (pane && isActionableError(payload.error)) {
       await writeStopFailureEvent(pane, payload);
     }
   } catch { /* swallow — never break the host session */ }

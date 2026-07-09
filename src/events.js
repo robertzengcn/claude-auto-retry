@@ -18,20 +18,30 @@ import { sanitizeKey } from './pane-key.js';
 export const EVENTS_DIR = join(homedir(), '.claude-auto-retry', 'events');
 
 // Error types the event path treats as a *transient overload* (seconds-scale backoff).
-// NOTE: `rate_limit` is deliberately EXCLUDED. For a subscription it is the session/usage
-// limit — an HOURS-scale wait until a printed reset time, not a seconds-scale retry.
-// Routing it here made the monitor fire futile "Continue" retries into a session-limited
-// pane and fight the (correct) scraper usage-wait path. Session/usage limits are owned by
-// the scraper usage path (it reliably reads the persistent "…resets <time>" banner and
-// waits); a genuinely transient API 429 is caught by the overload scraper's "temporarily
-// limiting requests" pattern — but only while the scraper is active (it is disabled once
-// eventMode latches), so API-key sessions in event mode currently get no retry for that
-// case. A known, accepted gap: rare, and strictly better than misrouting session limits.
-// Permanent errors (auth/billing/invalid) never retry.
+// `rate_limit` is NOT here: for a subscription/gateway usage limit it is an HOURS-scale
+// wait until a printed reset time, not a seconds-scale retry. Routing it through the
+// overload path fired futile "Continue" retries into a session-limited pane. It has its
+// own classification (USAGE_LIMIT) and the monitor routes it to the usage-wait path,
+// scraping the reset timestamp from the pane (the StopFailure payload carries none).
 const RETRYABLE = new Set(['overloaded', 'server_error']);
+// Claude Code reports `rate_limit` when a usage/session limit ends the turn. Reliable on
+// gateways (z.ai & similar) where the 429 renders transiently and the tail-restricted
+// scraper misses it — the event is the trustworthy trigger for those sessions.
+const USAGE_LIMIT = new Set(['rate_limit']);
 
 export function isRetryableError(errorType) {
   return typeof errorType === 'string' && RETRYABLE.has(errorType.toLowerCase());
+}
+
+export function isUsageLimitError(errorType) {
+  return typeof errorType === 'string' && USAGE_LIMIT.has(errorType.toLowerCase());
+}
+
+// Any error the hook should persist as an event for the monitor to act on:
+// overloaded/server_error → seconds-scale overload backoff; rate_limit → hours-scale
+// usage wait. Permanent errors (auth/billing/invalid) never persist — no retry helps.
+export function isActionableError(errorType) {
+  return isRetryableError(errorType) || isUsageLimitError(errorType);
 }
 
 // tmux pane ids look like "%2"; keep the marker filename to a safe charset.

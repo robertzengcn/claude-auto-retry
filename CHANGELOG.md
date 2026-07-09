@@ -28,6 +28,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   usage path, and the misroute made the two fight (futile `Continue` retries
   into a session-limited pane). The marker error type is validated at the
   consumer too, so an outdated installed hook can't reintroduce it (#31).
+- Gateway usage limits (z.ai and other Anthropic-compatible providers) now
+  auto-retry again. #31 dropped `rate_limit` from the event path on the
+  assumption the scraper would catch the limit banner — but a gateway 429
+  renders transiently and scrolls out of the 12-line tail, so the scraper
+  missed it and the `Continue` at the reset time never fired. `rate_limit` is
+  now a first-class event: the hook persists it, and the monitor routes it to
+  the hours-scale usage-wait path, scraping the reset timestamp from the pane
+  (the event payload carries none). A `rate_limit` with no reset time (a plain
+  transient 429) is still ignored. Default StopFailure matcher now includes
+  `rate_limit`; existing installs should re-run `claude-auto-retry install-hook`.
+
 
 ## [0.5.1] - 2026-06-30
 

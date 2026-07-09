@@ -118,6 +118,17 @@ describe('processOneTick', () => {
     assert.ok(s.waitUntil > Date.now());
   });
 
+  // Regression: the z.ai gateway usage-limit render (single-line "API Error: Request
+  // rejected (429) … reset at <ISO>") must be detected by the scraper when it sits in the
+  // live tail. Fixed in 3bc89e5; pinned here so a future pattern change can't silently
+  // drop the most common gateway shape.
+  it('detects the z.ai gateway usage-limit render in the live tail', async () => {
+    const t = mockTmux('API Error: Request rejected (429) · [1308][Usage limit reached for 5 hour. Your limit will reset at 2099-01-01 00:00:00][abc]');
+    const s = createMonitorState();
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
+    assert.ok(s.waitUntil > Date.now());
+  });
+
   // --- Regression: do not spam an already-resumed session. The usage path used to
   //     re-send every poll (up to maxRetries) while the limit banner lingered in
   //     scrollback after a successful resume — observed live as 5 injections into a
