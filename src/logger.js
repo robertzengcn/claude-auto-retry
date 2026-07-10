@@ -12,7 +12,10 @@ function timestamp() {
 }
 
 function todayFile(dir) {
-  return join(dir, `${new Date().toISOString().split('T')[0]}.log`);
+  // Local-date the filename so it matches the local-time timestamps written into it
+  // (toISOString here made the daily file name a day behind in UTC+ timezones — the
+  // overnight CST entries landed in "yesterday's" file).
+  return join(dir, `${new Date().toLocaleString('sv-SE').slice(0, 10)}.log`);
 }
 
 async function cleanup(dir) {

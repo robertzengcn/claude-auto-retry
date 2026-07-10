@@ -13,7 +13,7 @@ describe('createLogger', () => {
   it('creates log directory and writes log entry', async () => {
     const logger = createLogger(testDir);
     await logger.info('test message');
-    const today = new Date().toISOString().split('T')[0];
+    const today = new Date().toLocaleString('sv-SE').slice(0, 10);
     const content = await readFile(join(testDir, `${today}.log`), 'utf-8');
     assert.ok(content.includes('test message'));
     assert.ok(content.includes('[INFO]'));
@@ -21,7 +21,7 @@ describe('createLogger', () => {
   it('includes timestamp in log entries', async () => {
     const logger = createLogger(testDir);
     await logger.info('timestamped');
-    const today = new Date().toISOString().split('T')[0];
+    const today = new Date().toLocaleString('sv-SE').slice(0, 10);
     const content = await readFile(join(testDir, `${today}.log`), 'utf-8');
     assert.match(content, /\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]/);
   });
@@ -29,7 +29,7 @@ describe('createLogger', () => {
     const logger = createLogger(testDir);
     await logger.warn('warning msg');
     await logger.error('error msg');
-    const today = new Date().toISOString().split('T')[0];
+    const today = new Date().toLocaleString('sv-SE').slice(0, 10);
     const content = await readFile(join(testDir, `${today}.log`), 'utf-8');
     assert.ok(content.includes('[WARN]'));
     assert.ok(content.includes('[ERROR]'));
