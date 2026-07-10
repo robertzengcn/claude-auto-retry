@@ -111,6 +111,18 @@ describe('processOneTick', () => {
     assert.equal(s.status, 'waiting');
     assert.ok(s.waitUntil > Date.now());
   });
+  // Regression (2026-07-10): over a multi-hour wait the rate-limit banner scrolls out of
+  // the 12-line tail, so at the scheduled reset time isRateLimited() is false. The old
+  // gate bailed with "user-continued" and never sent the resume — sessions sat idle after
+  // the limit cleared. At the FIRST expiry (attempts === 0) we must send regardless.
+  it('sends the resume at the scheduled reset time even when the banner has scrolled off', async () => {
+    const t = mockTmux('● earlier Claude output\n  ❯ ');
+    const s = createMonitorState();
+    s.waitUntil = Date.now() - 1000; s.status = 'waiting'; s.attempts = 0;
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'retried');
+    assert.equal(t._sent.length, 1);
+    assert.equal(s.attempts, 1);
+  });
   it('detects multi-line TUI rate limit', async () => {
     const t = mockTmux('⚠ You\'ve hit your limit\n· resets 3pm (UTC)');
     const s = createMonitorState();

@@ -152,13 +152,17 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     if (Date.now() < state.waitUntil) return 'waiting';
     if (!isAlive()) return 'exit';
 
-    // Stop driving the session if the limit cleared OR Claude has already resumed and
-    // is working again. Without the isWorking gate the usage path re-sends the retry
-    // message every poll (up to maxRetries) while the limit banner lingers in the
-    // captured scrollback after a successful resume — spamming an actively-working
-    // session (and a banner re-printed by another process keeps it "rate-limited" the
-    // whole time). isWorking ⇒ the session continued; never inject into it.
-    if (!isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES) || isWorking(stripped)) {
+    // At the scheduled reset time, RESUME the session. Over a multi-hour wait the
+    // rate-limit banner scrolls out of the 12-line tail (the limit cleared, or the
+    // session idled), so re-checking it here is unreliable — doing so was the bug: the
+    // first expiry bailed with "user-continued" and never sent the resume, leaving an
+    // idle, un-resumed session.
+    //
+    // So at the FIRST expiry (attempts === 0 — the scheduled resume) always send, unless
+    // Claude already resumed on its own (isWorking). Only AFTER we've sent once does a
+    // missing banner mean "limit cleared → stop", so we don't spam a resumed session.
+    // (maxRetries still bounds the total attempts.)
+    if (isWorking(stripped) || (state.attempts > 0 && !isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES))) {
       state.status = 'monitoring'; state.attempts = 0; state._gaveUp = false;
       return 'user-continued';
     }
